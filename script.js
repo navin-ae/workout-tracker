@@ -33,8 +33,15 @@
     { id: 'shoulder', name: 'Shoulder + Abs',  hue: 'yellow' },
     { id: 'legs',     name: 'Leg Day',         hue: 'green' }
   ];
-  var SPLIT_BY_ID = {};
-  SPLITS.forEach(function (s) { SPLIT_BY_ID[s.id] = s; });
+  function splitList() {
+    return Store.data && Array.isArray(Store.data.splits) ? Store.data.splits : SPLITS;
+  }
+  function splitById(id) {
+    var list = splitList();
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    var archived = Store.data && Store.data.splitArchive && Store.data.splitArchive[id];
+    return archived || { id: id, name: 'Removed split', hue: 'blue' };
+  }
 
   var DEFAULT_PLAN = {
     back: ['Lat Pulldown', 'Seated Cable Row', 'Incline Dumbbell Curl',
@@ -123,8 +130,9 @@
   }
   function splitOfExercise(name) {
     var plan = Store.data ? Store.data.plan : DEFAULT_PLAN;
-    for (var i = 0; i < SPLITS.length; i++) {
-      if ((plan[SPLITS[i].id] || []).indexOf(name) >= 0) return SPLITS[i];
+    var splits = splitList();
+    for (var i = 0; i < splits.length; i++) {
+      if ((plan[splits[i].id] || []).indexOf(name) >= 0) return splits[i];
     }
     return null;
   }
@@ -157,6 +165,14 @@
   function dayKey(ts) {
     var d = new Date(ts);
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+  function localDayStart(day) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day || '')) return null;
+    var parts = day.split('-').map(Number);
+    var d = new Date(parts[0], parts[1] - 1, parts[2]);
+    if (d.getFullYear() !== parts[0] || d.getMonth() !== parts[1] - 1 || d.getDate() !== parts[2]) return null;
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
   }
   function startOfDay(ts) { var d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); }
   function fmtDate(ts) {
@@ -262,7 +278,9 @@
         lib[k] = { type: DEFAULT_LIBRARY[k].type, rest: DEFAULT_LIBRARY[k].rest, group: DEFAULT_LIBRARY[k].group };
       });
       return {
-        version: 2, plan: plan, library: lib,
+        version: 2, splits: SPLITS.map(function (s) {
+          return { id: s.id, name: s.name, hue: s.hue };
+        }), splitArchive: {}, plan: plan, library: lib,
         workouts: [], bodyweight: [], active: null, goal: 'lose',
         theme: 'light',
         /* 'after' — filling the sheet from memory later, so no session clock
@@ -292,7 +310,7 @@
       try { parsed = JSON.parse(raw); } catch (e) { Store.data = Store.blank(); return; }
 
       Store.data = Store.merge(parsed);
-      if (fromLegacy || parsed.version !== 2) Store.save();
+      if (fromLegacy || parsed.version !== 2 || !Array.isArray(parsed.splits)) Store.save();
     },
 
     /* Fills in anything a older or partial file is missing, and lifts v1's
@@ -310,12 +328,42 @@
           if (Array.isArray(d.targets[k]) && d.targets[k].length) base.targets[k] = d.targets[k];
         });
       }
+      if (Array.isArray(d.splits) && d.splits.length) {
+        var seenIds = {}, seenNames = {};
+        base.splits = d.splits.filter(function (s) {
+          if (!s || typeof s.id !== 'string' || !/^[a-z0-9_-]+$/i.test(s.id)) return false;
+          var name = String(s.name || '').trim().slice(0, 40);
+          var key = name.toLowerCase();
+          if (!name || seenIds[s.id] || seenNames[key]) return false;
+          seenIds[s.id] = true;
+          seenNames[key] = true;
+          return true;
+        }).map(function (s) {
+          return { id: s.id, name: String(s.name).trim().slice(0, 40),
+            hue: ['blue', 'red', 'yellow', 'green'].indexOf(s.hue) >= 0 ? s.hue : 'blue' };
+        });
+        if (!base.splits.length) base.splits = Store.blank().splits;
+      }
+      if (d.splitArchive && typeof d.splitArchive === 'object') {
+        Object.keys(d.splitArchive).forEach(function (id) {
+          var archived = d.splitArchive[id];
+          if (!/^[a-z0-9_-]+$/i.test(id) || !archived || typeof archived !== 'object') return;
+          var name = String(archived.name || '').trim().slice(0, 40);
+          if (!name) return;
+          base.splitArchive[id] = { id: id, name: name,
+            hue: ['blue', 'red', 'yellow', 'green'].indexOf(archived.hue) >= 0 ? archived.hue : 'blue' };
+        });
+      }
+      base.plan = {};
+      base.splits.forEach(function (s) {
+        base.plan[s.id] = DEFAULT_PLAN[s.id] ? DEFAULT_PLAN[s.id].slice() : [];
+      });
       if (d.library) {
         Object.keys(d.library).forEach(function (k) { base.library[k] = d.library[k]; });
       }
       if (d.plan) {
         Object.keys(base.plan).forEach(function (k) {
-          if (Array.isArray(d.plan[k]) && d.plan[k].length) base.plan[k] = d.plan[k].slice();
+          if (Array.isArray(d.plan[k])) base.plan[k] = d.plan[k].slice();
         });
       }
       base.bodyweight = Array.isArray(d.bodyweight) ? d.bodyweight.slice() : [];
@@ -575,7 +623,7 @@
       return { trend: 'pr', text: 'Personal record — best set yet' };
     }
     var prev = bestSetIn(name, prevSets);
-    if (!prev) return { trend: 'flat', text: 'First time logged' };
+    if (!prev) return { trend: 'flat', text: 'No previous session to compare' };
 
     var timed = typeOf(name) === 'time';
     if (timed) {
@@ -629,7 +677,7 @@
 
   function neglectedSplit() {
     var worst = null;
-    SPLITS.forEach(function (s) {
+    splitList().forEach(function (s) {
       var last = lastWorkoutOfSplit(s.id);
       if (!last) return;
       var days = daysBetween(last.ts, Date.now());
@@ -640,7 +688,7 @@
 
   function strongestSplit(days) {
     var since = Date.now() - days * 86400000, best = null;
-    SPLITS.forEach(function (s) {
+    splitList().forEach(function (s) {
       var gains = [];
       (DB().plan[s.id] || []).forEach(function (name) {
         if (typeOf(name) === 'time') return;
@@ -788,7 +836,7 @@
 
   function currentHue() {
     var a = DB().active;
-    return a ? SPLIT_BY_ID[a.split].hue : 'blue';
+    return a ? splitById(a.split).hue : 'blue';
   }
 
   /* --- Number pad ---------------------------------------------------------- */
@@ -1041,7 +1089,7 @@
     var lib = DB().library;
     var inPlan = {};
     Object.keys(DB().plan).forEach(function (k) {
-      DB().plan[k].forEach(function (nm) { inPlan[nm] = SPLIT_BY_ID[k]; });
+      DB().plan[k].forEach(function (nm) { inPlan[nm] = splitById(k); });
     });
 
     /* "chin" should surface Chin Up before Machine Crunch, so a name that
@@ -1277,7 +1325,7 @@
       '<span class="credit">Designed by Navin</span></div>';
 
     if (d.active) {
-      var aS = SPLIT_BY_ID[d.active.split];
+      var aS = splitById(d.active.split);
       var doneSets = d.active.entries.reduce(function (s, e) {
         return s + e.sets.filter(function (x) { return x.done && !x.warm; }).length;
       }, 0);
@@ -1294,7 +1342,7 @@
       (last ? '<span class="meta">' + fmtDate(last.ts) + '</span>' : '') + '</div>';
 
     if (last) {
-      var sp = SPLIT_BY_ID[last.split];
+      var sp = splitById(last.split);
       var shown = last.entries.slice(0, 4);
       html += '<div class="recap" data-hue="' + sp.hue + '">' +
         '<div class="recap-top"><div><div class="recap-split">' + esc(sp.name) + '</div>' +
@@ -1315,7 +1363,7 @@
         '<button class="btn btn-primary" data-act="repeat">Repeat this workout</button></div>';
     } else {
       html += '<div class="card empty"><h3>No workouts yet</h3>' +
-        '<p>Pick one of the four workouts below to get started. Once you finish it, ' +
+        '<p>Pick one of the workouts below to get started. Once you finish it, ' +
         'Strongr remembers every set so you can repeat it in one tap.</p>' +
         '<button class="btn btn-ghost btn-sm" data-act="seed" style="margin:14px auto 0">' +
         'Show me with sample data</button></div>';
@@ -1334,7 +1382,7 @@
     /* "Split" is gym jargon. A beginner starts a workout. */
     html += '<div class="sec-head"><h2>Start a workout</h2>' +
       '<button class="link" data-act="edit-plans">Edit</button></div><div class="splits">';
-    SPLITS.forEach(function (s) {
+    splitList().forEach(function (s) {
       var lw = lastWorkoutOfSplit(s.id);
       html += '<button class="split-btn" data-hue="' + s.hue + '" data-act="start" data-split="' + s.id + '">' +
         '<div class="sb-name">' + esc(s.name) + '</div>' +
@@ -1360,9 +1408,9 @@
     var recent = d.workouts.slice(-6).reverse();
     if (recent.length) {
       html += '<div class="sec-head"><h2>Recent workouts</h2>' +
-        '<span class="meta">' + d.workouts.length + ' total</span></div><div class="rows">';
+        '<button class="link" data-act="all-workouts">All ' + d.workouts.length + '</button></div><div class="rows">';
       recent.forEach(function (w) {
-        var s = SPLIT_BY_ID[w.split];
+        var s = splitById(w.split);
         html += '<button class="row" data-hue="' + s.hue + '" data-act="open-summary" data-id="' + w.id + '">' +
           '<span class="row-bar"></span><span class="row-main">' +
           '<span class="row-k">' + esc(s.name) + '</span>' +
@@ -1380,7 +1428,9 @@
 
   /* --- 7.2 Workout ------------------------------------------------------------ */
 
-  function isLive() { return DB().logMode === 'live'; }
+  function isLive() {
+    return DB().logMode === 'live' && !(DB().active && DB().active.dateOnly);
+  }
   function logDateOf(a) { return (a && a.logDate) || Date.now(); }
 
   /* Back-dating: keep the clock time so two sessions on one day still order,
@@ -1495,17 +1545,20 @@
     return { exercise: name, note: '', restSec: restOf(name), sets: sets };
   }
 
-  function startWorkout(splitId, prefill) {
+  function startWorkout(splitId, prefill, backfillDate) {
     var names = DB().plan[splitId] || [];
     DB().active = {
       split: splitId,
       startedAt: Date.now(),
+      logDate: backfillDate,
+      dateOnly: backfillDate !== undefined,
       cardio: { done: false, minutes: CARDIO.defaultMinutes },
       rest: null,
       entries: names.map(function (nm) { return buildEntry(nm, prefill); })
     };
-    Store.save();
+    if (!Store.save()) { DB().active = null; return false; }
     go('workout');
+    return true;
   }
 
   function repeatLast() {
@@ -1534,7 +1587,7 @@
   function screenWorkout() {
     var a = DB().active;
     if (!a) { go('home'); return; }
-    var split = SPLIT_BY_ID[a.split];
+    var split = splitById(a.split);
     document.body.classList.add('is-focusmode');
 
     var live = isLive();
@@ -1555,9 +1608,10 @@
         '<span class="ic">' + icon('note') + '</span>' +
         '<div class="co-main"><h3>Filling in the sheet</h3>' +
         '<p>Tap any weight or reps box to change it. <b>Previous</b> shows what you ' +
-        'lifted last time — tap it to copy that set across. Tick every set you did' +
+          'lifted last time — tap it to copy that set across. Tick every set you did. ' +
+          'Checked sets are saved to Records when you finish the workout' +
         (live ? ', and a rest timer starts each time.'
-              : '. Not from today? Tap the date to change it.') + '</p></div>' +
+            : '. Not from today? Tap the date to change it.') + '</p></div>' +
         '<button class="co-x" data-act="learned" data-key="sheet" ' +
         'aria-label="Hide this">' + icon('close') + '</button></div>';
     }
@@ -1577,7 +1631,8 @@
     html += '</div>';
 
     html += '<div class="finishbar" data-hue="' + split.hue + '"><div class="inner">' +
-      '<button class="btn btn-primary" data-act="finish">Finish workout</button></div></div>';
+      '<button class="btn btn-primary" data-act="finish">Finish &amp; save workout</button>' +
+      '<div class="finishbar-note">Saves checked sets to Records</div></div></div>';
 
     view.innerHTML = html;
     a.entries.forEach(function (e, i) { paintVerdict(i); });
@@ -1623,7 +1678,7 @@
     var header = '<div class="sets-head"><span>Set</span>' +
       '<span>' + (onTarget ? 'Target' : 'Previous') + '</span>' +
       (timed ? '' : '<span>' + UNIT + '</span>') +
-      '<span>' + (timed ? 'Seconds' : 'Reps') + '</span><span></span></div>';
+      '<span>' + (timed ? 'Seconds' : 'Reps') + '</span><span>Done</span></div>';
 
     var rows = e.sets.map(function (s, j) { return setRow(e, i, j); }).join('');
 
@@ -1656,7 +1711,9 @@
       (prev ? ' data-fill="1"' : '') + '>' + (prev ? fmtSetValue(name, prev) : '—') + '</button>' +
       (timed ? '' : cell('w')) + cell('r') +
       '<button class="set-done" data-act="toggle-set" data-ex="' + i + '" data-set="' + j +
-      '" aria-label="Mark set complete">' + icon('check') + '</button>' +
+      '" aria-pressed="' + (!!s.done) + '" aria-label="' + (s.done
+        ? 'Set ' + (j + 1) + ' logged; tap to undo'
+        : 'Log set ' + (j + 1)) + '">' + icon('check') + '</button>' +
       '</div>';
   }
 
@@ -1668,6 +1725,13 @@
     row.classList.toggle('is-done', !!s.done);
     row.classList.toggle('is-warm', !!s.warm);
     $('.set-n', row).textContent = s.warm ? 'W' : (workingIndex(e.sets, j) + 1);
+    var doneButton = $('.set-done', row);
+    if (doneButton) {
+      doneButton.setAttribute('aria-pressed', s.done ? 'true' : 'false');
+      doneButton.setAttribute('aria-label', s.done
+        ? 'Set ' + (j + 1) + ' logged; tap to undo'
+        : 'Log set ' + (j + 1));
+    }
 
     var prev = ghostSetFor(e.exercise, j);
     ['w', 'r'].forEach(function (f) {
@@ -1752,7 +1816,8 @@
       return;
     }
 
-    var ts = isLive() ? Date.now() : logDateOf(a);
+    var liveSession = isLive();
+    var ts = liveSession ? Date.now() : logDateOf(a);
     var prs = [];
     entries.forEach(function (e) {
       var todayBest = bestSetIn(e.exercise, e.sets);
@@ -1776,7 +1841,7 @@
       id: 'w' + ts, ts: ts, split: a.split,
       /* No session clock when logging afterwards — a made-up duration is
          worse than none. */
-      durationMs: isLive() ? Math.max(0, Date.now() - a.startedAt) : 0,
+      durationMs: liveSession ? Math.max(0, Date.now() - a.startedAt) : 0,
       cardio: { done: a.cardio.done, minutes: a.cardio.minutes },
       entries: entries, prs: prs
     };
@@ -1798,10 +1863,201 @@
 
   /* --- 7.3 Summary ------------------------------------------------------------- */
 
+  var editDraft = null, editReturn = null, editSaving = false;
+
+  function beginWorkoutEdit(id) {
+    var workout = DB().workouts.filter(function (w) { return w.id === id; })[0];
+    if (!workout) { toast('Workout no longer exists'); return; }
+    editDraft = JSON.parse(JSON.stringify(workout));
+    editReturn = { screen: state.screen, params: state.params };
+    go('edit-workout', { id: id });
+  }
+
+  function screenAllWorkouts() {
+    var workouts = DB().workouts.slice().reverse();
+    var html = '<div class="screen"><header class="masthead"><h1>Workouts</h1>' +
+      '<span class="tagline">' + plural(workouts.length, 'session') + '</span></header>';
+    html += '<button class="btn" data-act="new-history-workout" style="margin-bottom:14px">' +
+      '<span class="action-icon">' + icon('plus') + '</span>Log a missed workout</button>';
+    if (!workouts.length) {
+      view.innerHTML = html + '<div class="card empty"><h3>No workouts yet</h3>' +
+        '<p>Finished workouts will appear here.</p></div></div>';
+      return;
+    }
+    html += '<div class="rows">';
+    workouts.forEach(function (w) {
+      var split = splitById(w.split);
+      html += '<div class="row workout-history-row" data-hue="' + split.hue + '">' +
+        '<span class="row-bar"></span><button class="row-main" data-act="open-summary" data-id="' + esc(w.id) + '">' +
+        '<span class="row-k">' + esc(split.name) + '</span>' +
+        '<span class="row-sub">' + fmtDate(w.ts) + ' · ' + plural(setsOfWorkout(w), 'set') +
+        (w.cardio.done ? ' · cardio' : '') + '</span></button>' +
+        '<button class="edit-action" data-act="edit-workout" data-id="' + esc(w.id) + '" aria-label="Edit ' +
+        esc(split.name + ' workout from ' + fmtDate(w.ts)) + '">' + icon('pencil') + '<span>Edit</span></button></div>';
+    });
+    view.innerHTML = html + '</div></div>';
+  }
+
+  function screenNewHistoryWorkout() {
+    var today = dayKey(Date.now());
+    view.innerHTML = '<div class="screen"><header class="masthead"><h1>Log a missed workout</h1></header>' +
+      '<p class="hint export-hint">Choose when you trained and which split. Your sets will be saved under that date.</p>' +
+      '<form id="historyWorkoutForm" class="export-form" novalidate>' +
+      '<label class="edit-field">Workout date<input id="historyWorkoutDate" name="date" type="date" required max="' +
+      today + '" value="' + esc(state.params.date || today) + '"></label>' +
+      '<label class="edit-field">Workout split<select name="split" required>' +
+      splitList().map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>'; }).join('') +
+      '</select></label>' +
+      '<p id="historyWorkoutError" class="form-error" role="alert" tabindex="-1" hidden></p>' +
+      '<button class="btn btn-primary" type="submit">Enter workout</button></form>' +
+      '<button class="btn btn-ghost" data-act="all-workouts">Cancel</button></div>';
+  }
+
+  function submitHistoryWorkout() {
+    var form = $('#historyWorkoutForm'), error = $('#historyWorkoutError');
+    if (!form.reportValidity()) return;
+    if (DB().active) {
+      error.textContent = 'Finish or discard your unfinished workout before logging a missed session.';
+      error.hidden = false;
+      error.focus();
+      return;
+    }
+    var date = form.elements.date.value, dateStart = localDayStart(date);
+    if (dateStart === null || dateStart > startOfDay(Date.now())) {
+      error.textContent = 'Choose a valid date that is today or earlier.';
+      error.hidden = false;
+      error.focus();
+      return;
+    }
+    var splitId = form.elements.split.value;
+    if (!splitList().some(function (s) { return s.id === splitId; })) {
+      error.textContent = 'Choose an available workout split.';
+      error.hidden = false;
+      error.focus();
+      return;
+    }
+    var chosen = new Date(dateStart), now = new Date();
+    chosen.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+    startWorkout(splitId, false, chosen.getTime());
+  }
+
+  function screenEditWorkout() {
+    if (!editDraft || editDraft.id !== state.params.id) {
+      view.innerHTML = '<div class="screen"><div class="card empty"><h3>Workout unavailable</h3>' +
+        '<button class="btn btn-primary" data-act="all-workouts">Back to workouts</button></div></div>';
+      return;
+    }
+    var w = editDraft, split = splitById(w.split), options = splitList().slice();
+    if (!options.some(function (s) { return s.id === w.split; })) options.push(split);
+    var html = '<div class="screen"><header class="masthead"><h1>Edit workout</h1></header>' +
+      '<form id="editWorkoutForm" novalidate>' +
+      '<div class="edit-meta"><label class="edit-field">Workout split<select name="split" required>' +
+      options.map(function (s) { return '<option value="' + esc(s.id) + '"' + (s.id === w.split ? ' selected' : '') +
+        '>' + esc(s.name) + '</option>'; }).join('') + '</select></label>' +
+      '<label class="edit-field">Date<input name="date" type="date" required max="' + dayKey(Date.now()) +
+        '" value="' + dayKey(w.ts) + '"></label></div>' +
+      '<div class="edit-readonly">Duration: ' + (w.durationMs ? esc(fmtDuration(w.durationMs)) : 'Not recorded') + '</div>' +
+      '<fieldset class="edit-cardio"><legend>Cardio</legend>' +
+      '<label class="edit-check"><input name="cardioDone" type="checkbox"' + (w.cardio.done ? ' checked' : '') +
+        '> ' + esc(CARDIO.name) + ' completed</label>' +
+      '<label class="edit-field">Minutes<input name="cardioMinutes" type="number" min="1" max="600" step="1" required value="' +
+        esc(w.cardio.minutes) + '"></label></fieldset>';
+    w.entries.forEach(function (entry, ei) {
+      html += '<fieldset class="edit-entry"><legend>' + esc(entry.exercise) + '</legend>' +
+        '<label class="edit-field edit-note">Note<input data-entry="' + ei + '" data-field="note" maxlength="120" value="' +
+        esc(entry.note || '') + '"></label>';
+      entry.sets.forEach(function (set, si) {
+        var timed = typeOf(entry.exercise) === 'time';
+        html += '<div class="edit-set"><label class="edit-field">' + (timed ? 'Seconds' : 'Weight (' + UNIT + ')') +
+          '<input type="number" inputmode="decimal" min="0" step="any" required data-entry="' + ei + '" data-set="' + si +
+          '" data-field="' + (timed ? 'r' : 'w') + '" value="' + (timed ? esc(set.r) : esc(set.w)) + '"></label>' +
+          (!timed ? '<label class="edit-field">Reps<input type="number" inputmode="numeric" min="1" step="1" required data-entry="' +
+          ei + '" data-set="' + si + '" data-field="r" value="' + esc(set.r) + '"></label>' : '') +
+          '<label class="edit-check"><input type="checkbox" data-entry="' + ei + '" data-set="' + si + '" data-field="warm"' +
+            (set.warm ? ' checked' : '') + '> Warm-up</label></div>';
+      });
+          html += '</fieldset>';
+    });
+    html += '<p id="editError" class="form-error" role="alert" tabindex="-1" hidden></p>' +
+      '<button class="btn btn-primary" type="submit"' + (editSaving ? ' disabled' : '') + '>Save changes</button>' +
+      '<button class="btn btn-ghost" type="button" data-act="cancel-workout-edit">Cancel</button></form></div>';
+    view.innerHTML = html;
+  }
+
+  function submitWorkoutEdit() {
+    if (editSaving || !editDraft) return;
+    var form = $('#editWorkoutForm'), error = $('#editError');
+    var fail = function (message) {
+      error.textContent = message;
+      error.hidden = false;
+      error.focus();
+    };
+    if (!form.reportValidity()) return;
+    var dateValue = form.elements.date.value, dayStart = localDayStart(dateValue);
+    if (dayStart === null || dayStart > startOfDay(Date.now())) { fail('Choose a valid date that is not in the future.'); return; }
+    var minutes = Number(form.elements.cardioMinutes.value);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 600) { fail('Cardio minutes must be between 1 and 600.'); return; }
+    var entries;
+    try {
+      entries = editDraft.entries.map(function (entry, ei) {
+      var copy = { exercise: entry.exercise, note: '', sets: [] };
+      var note = form.querySelector('[data-entry="' + ei + '"][data-field="note"]');
+      copy.note = note ? note.value.trim().slice(0, 120) : (entry.note || '');
+      entry.sets.forEach(function (set, si) {
+        var warm = form.querySelector('[data-entry="' + ei + '"][data-set="' + si + '"][data-field="warm"]');
+        var timed = typeOf(entry.exercise) === 'time';
+        var repsInput = timed
+          ? form.querySelector('[data-entry="' + ei + '"][data-set="' + si + '"][data-field="r"]')
+          : form.querySelector('[data-entry="' + ei + '"][data-set="' + si + '"][data-field="r"]');
+        var weightInput = timed ? null : form.querySelector('[data-entry="' + ei + '"][data-set="' + si + '"][data-field="w"]');
+        var reps = Number(repsInput && repsInput.value), weight = timed ? 0 : Number(weightInput && weightInput.value);
+        if (!Number.isInteger(reps) || reps <= 0 || (!timed && (!Number.isFinite(weight) || weight < 0))) {
+          throw new Error('Enter a valid weight and a positive number of reps or seconds for every set.');
+        }
+        copy.sets.push({ w: weight, r: reps, warm: !!(warm && warm.checked) });
+      });
+        return copy;
+      });
+    } catch (validationError) {
+      fail(validationError.message);
+      return;
+    }
+    if (!entries.length && !form.elements.cardioDone.checked) { fail('Keep at least one exercise or mark cardio complete.'); return; }
+    var original = DB().workouts.filter(function (w) { return w.id === editDraft.id; })[0];
+    if (!original) { fail('This workout no longer exists.'); return; }
+    var candidate = JSON.parse(JSON.stringify(original));
+    var oldDate = new Date(candidate.ts), chosenDate = new Date(dayStart);
+    chosenDate.setHours(oldDate.getHours(), oldDate.getMinutes(), oldDate.getSeconds(), oldDate.getMilliseconds());
+    candidate.ts = chosenDate.getTime();
+    candidate.split = form.elements.split.value;
+    candidate.cardio = { done: form.elements.cardioDone.checked, minutes: minutes };
+    candidate.entries = entries;
+    var index = DB().workouts.indexOf(original);
+    DB().workouts[index] = candidate;
+    DB().workouts.sort(function (a, b) { return a.ts - b.ts; });
+    recomputeAllPRs();
+    editSaving = true;
+    if (!Store.save()) {
+      var currentIndex = DB().workouts.indexOf(candidate);
+      if (currentIndex >= 0) DB().workouts[currentIndex] = original;
+      DB().workouts.sort(function (a, b) { return a.ts - b.ts; });
+      recomputeAllPRs();
+      editSaving = false;
+      fail('Changes could not be saved. Your original workout is still available.');
+      return;
+    }
+    editSaving = false;
+    var destination = editReturn || { screen: 'all-workouts', params: {} };
+    editDraft = null;
+    editReturn = null;
+    go(destination.screen, destination.params);
+    toast('Workout updated');
+  }
+
   function screenSummary() {
     var w = DB().workouts.filter(function (x) { return x.id === state.params.id; })[0];
     if (!w) { go('home'); return; }
-    var split = SPLIT_BY_ID[w.split];
+    var split = splitById(w.split);
     var fresh = Date.now() - w.ts < 120000;
     var added = state.params.newExercises || [];
     document.body.classList.remove('is-focusmode');
@@ -1872,7 +2128,8 @@
         '<span class="row-v"><span class="cell-v">' + fmtSetValue(e.exercise, top) + '</span></span>' +
         '<span class="row-chev">' + icon('chev') + '</span></button>';
     });
-    html += '</div><button class="btn btn-primary" data-act="home">Done</button></div>';
+    html += '</div><button class="btn" data-act="edit-workout" data-id="' + esc(w.id) + '">Edit workout</button>' +
+      '<button class="btn btn-primary" data-act="home">Done</button></div>';
 
     view.innerHTML = html;
   }
@@ -1934,7 +2191,7 @@
       return out + '</div>';
     };
 
-    SPLITS.forEach(function (s) {
+    splitList().forEach(function (s) {
       html += block(s.name, s.hue, (DB().plan[s.id] || []).filter(function (nm) {
         return (grouped[s.id] || []).indexOf(nm) >= 0;
       }));
@@ -2087,16 +2344,25 @@
 
   function screenPlans() {
     var d = DB();
-    var html = '<div class="screen"><header class="masthead"><h1>Your workouts</h1>' +
-      '<span class="tagline">Reorder, remove, or add exercises</span></header>' +
+    var html = '<div class="screen"><header class="masthead"><h1>Manage workouts</h1>' +
+      '<span class="tagline">Splits and exercises</span></header>' +
       '<p class="hint" style="margin:0 2px 18px">Tap an exercise to set the weights and ' +
       'reps you normally do, and new sheets arrive filled in. Removing an exercise ' +
       'keeps its history.</p>';
 
-    SPLITS.forEach(function (s) {
+    var splits = splitList();
+    splits.forEach(function (s, splitIndex) {
       var list = d.plan[s.id] || [];
-      html += '<div class="sec-head" data-hue="' + s.hue + '"><h2>' + esc(s.name) + '</h2>' +
-        '<span class="meta">' + plural(list.length, 'exercise') + '</span></div><div class="rows">';
+      html += '<div class="sec-head split-manager-head" data-hue="' + s.hue + '"><h2>' + esc(s.name) + '</h2>' +
+        '<div class="split-controls">' +
+        '<button class="icon-btn split-control" data-act="split-move" data-id="' + esc(s.id) + '" data-dir="-1"' +
+        (splitIndex === 0 ? ' disabled' : '') + ' aria-label="Move ' + esc(s.name) + ' up">' + icon('up') + '</button>' +
+        '<button class="icon-btn split-control" data-act="split-move" data-id="' + esc(s.id) + '" data-dir="1"' +
+        (splitIndex === splits.length - 1 ? ' disabled' : '') + ' aria-label="Move ' + esc(s.name) + ' down">' + icon('down') + '</button>' +
+        '<button class="icon-btn split-control" data-act="split-rename" data-id="' + esc(s.id) + '" aria-label="Rename ' +
+        esc(s.name) + '">' + icon('pencil') + '</button>' +
+        '<button class="icon-btn split-control" data-act="split-delete" data-id="' + esc(s.id) + '" aria-label="Delete ' +
+        esc(s.name) + '">' + icon('trash') + '</button></div></div><div class="rows">';
       list.forEach(function (nm, i) {
         var target = summariseTarget(nm);
         html += '<div class="row" data-hue="' + s.hue + '">' +
@@ -2119,7 +2385,73 @@
         '" style="margin-top:10px;width:100%">Add an exercise</button>';
     });
 
+    html += '<button class="btn" data-act="split-add" style="margin-top:20px">' +
+      '<span class="action-icon">' + icon('plus') + '</span>Add a split</button>';
     view.innerHTML = html + '</div>';
+  }
+
+  function openSplitNameSheet(id) {
+    var current = id ? splitById(id) : null;
+    openSheet('<h3>' + (current ? 'Rename split' : 'Add a split') + '</h3>' +
+      '<label class="sheet-label" for="splitNameInput">Split name</label>' +
+      '<input class="sh-search" id="splitNameInput" type="text" maxlength="40" required value="' +
+      esc(current ? current.name : '') + '" autocomplete="off">' +
+      '<p id="splitNameError" class="form-error" role="alert" tabindex="-1" hidden></p>' +
+      '<button class="btn btn-primary" data-act="save-split-name" data-id="' + (id ? esc(id) : '') + '">' +
+      (current ? 'Save name' : 'Add split') + '</button>' +
+      '<button class="btn btn-ghost" data-act="close-sheet">Cancel</button>');
+    setTimeout(function () { var input = $('#splitNameInput'); if (input) input.focus(); }, 60);
+  }
+
+  function saveSplitName(id) {
+    var input = $('#splitNameInput'), error = $('#splitNameError');
+    var name = input ? input.value.trim().slice(0, 40) : '';
+    var duplicate = splitList().some(function (s) {
+      return s.id !== id && s.name.toLowerCase() === name.toLowerCase();
+    });
+    if (!name || duplicate) {
+      error.textContent = !name ? 'Enter a split name.' : 'A split with that name already exists.';
+      error.hidden = false;
+      error.focus();
+      return;
+    }
+    var before = JSON.stringify(DB());
+    if (id) {
+      var existing = splitList().filter(function (s) { return s.id === id; })[0];
+      if (!existing) { toast('Split no longer exists'); closeSheet(); return; }
+      existing.name = name;
+    } else {
+      var baseId = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'split';
+      var splitId = baseId, suffix = 2;
+      while (DB().splits.some(function (s) { return s.id === splitId; }) || DB().splitArchive[splitId]) {
+        splitId = baseId + '-' + suffix++;
+      }
+      var hues = ['blue', 'red', 'yellow', 'green'];
+      DB().splits.push({ id: splitId, name: name, hue: hues[DB().splits.length % hues.length] });
+      DB().plan[splitId] = [];
+    }
+    if (!Store.save()) { Store.data = JSON.parse(before); closeSheet(); render(); return; }
+    closeSheet();
+    render();
+    toast(id ? 'Split renamed' : 'Split added');
+  }
+
+  function deleteSplit(id) {
+    var split = splitList().filter(function (s) { return s.id === id; })[0];
+    if (!split) { toast('Split no longer exists'); render(); return; }
+    if (splitList().length <= 1) { toast('Keep at least one split'); return; }
+    var associated = DB().workouts.filter(function (w) { return w.split === id; }).length;
+    var activeAssociated = !!(DB().active && DB().active.split === id);
+    if ((associated || activeAssociated) && !confirm('Delete "' + split.name + '"? ' +
+      (associated ? plural(associated, 'workout') + ' will keep its saved history under this split name.' : '') +
+      (activeAssociated ? ' The active workout will remain available under this split name.' : ''))) return;
+    var before = JSON.stringify(DB());
+    DB().splits = DB().splits.filter(function (s) { return s.id !== id; });
+    if (associated || activeAssociated) DB().splitArchive[id] = { id: split.id, name: split.name, hue: split.hue };
+    delete DB().plan[id];
+    if (!Store.save()) { Store.data = JSON.parse(before); render(); return; }
+    render();
+    toast('Split deleted');
   }
 
   /* --- 7.7 Weight -------------------------------------------------------------------- */
@@ -2285,6 +2617,7 @@
       'Save a copy before you clear site data or move to a new phone.</p>' +
       '<div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">' +
       '<button class="btn btn-sm" data-act="export">Save a copy</button>' +
+      '<button class="btn btn-sm" data-act="range-export">Export date range</button>' +
       '<button class="btn btn-sm" data-act="import">Restore a copy</button>' +
       (d.workouts.length ? '' : '<button class="btn btn-sm" data-act="seed">Sample data</button>') +
       '<button class="btn btn-sm btn-danger" data-act="wipe">Erase everything</button>' +
@@ -2299,6 +2632,165 @@
   }
 
   /* --- 7.9 Import / export ---------------------------------------------------------- */
+
+  function screenExport() {
+    view.innerHTML = '<div class="screen"><header class="masthead"><h1>Export workouts</h1></header>' +
+      '<p class="hint export-hint">Choose an inclusive date range. Your saved workouts will not be changed.</p>' +
+      '<form id="rangeExportForm" class="export-form" novalidate>' +
+      '<label class="edit-field">Start date<input id="exportStart" name="start" type="date" required></label>' +
+      '<label class="edit-field">End date<input id="exportEnd" name="end" type="date" required></label>' +
+      '<p id="exportError" class="form-error" role="alert" tabindex="-1" hidden></p>' +
+      '<div class="export-actions"><button class="btn btn-primary" type="button" data-act="export-range" data-format="json">' +
+      'Export JSON</button><button class="btn" type="button" data-act="export-range" data-format="csv">Export CSV</button></div>' +
+      '</form><button class="btn btn-ghost" data-act="home">Cancel</button></div>';
+  }
+
+  function csvCell(value) {
+    var text = value === null || value === undefined ? '' : String(value);
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
+  function downloadBlob(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+
+  function workoutCsv(workouts) {
+    var rows = [[
+      'workoutId', 'date', 'timestamp', 'splitId', 'splitName', 'durationMs',
+      'cardioDone', 'cardioMinutes', 'exercise', 'note', 'setNumber',
+      'weight', 'repsOrSeconds', 'warmUp', 'personalRecords'
+    ]];
+    workouts.forEach(function (w) {
+      var split = splitById(w.split), entries = w.entries || [];
+      if (!entries.length) {
+        rows.push([w.id, dayKey(w.ts), w.ts, w.split, split.name, w.durationMs,
+          !!w.cardio.done, w.cardio.minutes, '', '', '', '', '', '', JSON.stringify(w.prs || [])]);
+        return;
+      }
+      entries.forEach(function (entry) {
+        var sets = entry.sets || [];
+        if (!sets.length) {
+          rows.push([w.id, dayKey(w.ts), w.ts, w.split, split.name, w.durationMs,
+            !!w.cardio.done, w.cardio.minutes, entry.exercise, entry.note || '', '', '', '', '', JSON.stringify(w.prs || [])]);
+          return;
+        }
+        sets.forEach(function (set, index) {
+          rows.push([w.id, dayKey(w.ts), w.ts, w.split, split.name, w.durationMs,
+            !!w.cardio.done, w.cardio.minutes, entry.exercise, entry.note || '', index + 1,
+            set.w, set.r, !!set.warm, JSON.stringify(w.prs || [])]);
+        });
+      });
+    });
+    return '\uFEFF' + rows.map(function (row) { return row.map(csvCell).join(','); }).join('\r\n');
+  }
+
+  function aiWorkoutExport(workouts, startDay, endDay) {
+    var byDate = {};
+    workouts.forEach(function (w) {
+      var date = dayKey(w.ts), split = splitById(w.split);
+      var detailed = {
+        workoutId: w.id,
+        date: date,
+        timestampMs: w.ts,
+        splitId: w.split,
+        splitName: split.name,
+        splitColor: split.hue,
+        durationMs: w.durationMs || 0,
+        cardio: {
+          completed: !!(w.cardio && w.cardio.done),
+          minutes: w.cardio ? w.cardio.minutes : null
+        },
+        exercises: (w.entries || []).map(function (entry) {
+          var exerciseType = typeOf(entry.exercise);
+          return {
+            name: entry.exercise,
+            type: exerciseType,
+            note: entry.note || '',
+            sets: (entry.sets || []).map(function (set, index) {
+              return {
+                setNumber: index + 1,
+                weight: exerciseType === 'time' ? null : set.w,
+                weightUnit: exerciseType === 'time' ? null : UNIT,
+                reps: exerciseType === 'time' ? null : set.r,
+                durationSeconds: exerciseType === 'time' ? set.r : null,
+                valueUnit: exerciseType === 'time' ? 'seconds' : 'reps',
+                warmUp: !!set.warm
+              };
+            })
+          };
+        }),
+        personalRecords: w.prs || [],
+        sourceWorkout: w
+      };
+      if (!byDate[date]) byDate[date] = [];
+      byDate[date].push(detailed);
+    });
+    return {
+      format: 'strongr-ai-workout-log',
+      formatVersion: 1,
+      exportedAt: new Date().toISOString(),
+      dateRange: { start: startDay, end: endDay, inclusive: true },
+      workoutCount: workouts.length,
+      days: Object.keys(byDate).sort().map(function (date) {
+        return { date: date, workouts: byDate[date] };
+      })
+    };
+  }
+
+  function exportWorkoutRange(format) {
+    var start = $('#exportStart'), end = $('#exportEnd'), error = $('#exportError');
+    var startTs = start && localDayStart(start.value), endTs = end && localDayStart(end.value);
+    var fail = function (message) {
+      error.textContent = message;
+      error.hidden = false;
+      error.focus();
+    };
+    if (startTs === null || endTs === null) { fail('Choose both a valid start date and end date.'); return; }
+    if (startTs > endTs) { fail('Start date must be on or before end date.'); return; }
+    var startDay = start.value, endDay = end.value;
+    var workouts = DB().workouts.filter(function (w) {
+      var date = dayKey(w.ts);
+      return date >= startDay && date <= endDay;
+    });
+    if (!workouts.length) { fail('No workouts were found in that date range.'); return; }
+    var filename = 'strongr-workouts-' + startDay + '-to-' + endDay + '.' + format;
+    try {
+      var body, type;
+      if (format === 'csv') {
+        body = workoutCsv(workouts);
+        type = 'text/csv;charset=utf-8';
+      } else {
+        body = JSON.stringify(aiWorkoutExport(workouts, startDay, endDay), null, 2);
+        type = 'application/json';
+      }
+      error.hidden = true;
+      var blob = new Blob([body], { type: type });
+      var standalone = !!navigator.standalone ||
+        !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+      var file = typeof File === 'function' ? new File([blob], filename, { type: type }) : null;
+      if (standalone && file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file], title: 'Strongr workout export' }).then(function () {
+          toast('Export ready to save');
+        }).catch(function (shareError) {
+          if (shareError.name === 'AbortError') toast('Export canceled');
+          else fail('This iPhone could not share the export. Try opening Strongr in Safari.');
+        });
+      } else {
+        downloadBlob(blob, filename);
+        toast('Export started: ' + plural(workouts.length, 'workout'));
+      }
+    } catch (e) {
+      fail('Export could not be prepared in this browser.');
+    }
+  }
 
   function exportData() {
     try {
@@ -2341,10 +2833,13 @@
 
   var SCREENS = {
     home: screenHome, workout: screenWorkout, summary: screenSummary,
+    workouts: screenAllWorkouts, 'new-history-workout': screenNewHistoryWorkout,
+    'edit-workout': screenEditWorkout,
+    export: screenExport,
     records: screenRecords, history: screenHistory, plans: screenPlans,
     weight: screenWeight, insights: screenInsights
   };
-  var TABS = { home: 'home', records: 'records', weight: 'weight', insights: 'insights' };
+  var TABS = { home: 'home', workouts: 'workouts', records: 'records', weight: 'weight', insights: 'insights' };
 
   function go(screen, params) {
     if (screen === 'history') state.prev = { screen: state.screen, params: state.params };
@@ -2397,6 +2892,17 @@
       case 'repeat': repeatLast(); break;
       case 'start': startWorkout(el.getAttribute('data-split'), false); break;
       case 'open-summary': go('summary', { id: el.getAttribute('data-id') }); break;
+      case 'all-workouts': go('workouts'); break;
+      case 'new-history-workout': go('new-history-workout', { date: el.getAttribute('data-date') || '' }); break;
+      case 'edit-workout': beginWorkoutEdit(el.getAttribute('data-id')); break;
+      case 'range-export': go('export'); break;
+      case 'export-range': exportWorkoutRange(el.getAttribute('data-format')); break;
+      case 'cancel-workout-edit': {
+        var editDestination = editReturn || { screen: 'workouts', params: {} };
+        editDraft = null; editReturn = null; editSaving = false;
+        go(editDestination.screen, editDestination.params);
+        break;
+      }
       case 'open-history': go('history', { ex: el.getAttribute('data-ex') }); break;
       case 'edit-plans': go('plans'); break;
       case 'close-sheet': closeSheet(); break;
@@ -2563,7 +3069,7 @@
         Store.save();
         el.textContent = 'Kept';
         el.setAttribute('disabled', 'disabled');
-        toast(kn + ' added to ' + SPLIT_BY_ID[ks].name);
+        toast(kn + ' added to ' + splitById(ks).name);
         break;
       }
 
@@ -2638,6 +3144,23 @@
         var removed = DB().plan[sid2].splice(idx2, 1)[0];
         Store.save(); render();
         toast(removed + ' removed — its history is kept');
+        break;
+      }
+      case 'split-add': openSplitNameSheet(''); break;
+      case 'split-rename': openSplitNameSheet(el.getAttribute('data-id')); break;
+      case 'save-split-name': saveSplitName(el.getAttribute('data-id')); break;
+      case 'split-delete': deleteSplit(el.getAttribute('data-id')); break;
+      case 'split-move': {
+        var splitIdToMove = el.getAttribute('data-id');
+        var splitIndex = DB().splits.findIndex(function (s) { return s.id === splitIdToMove; });
+        var splitTarget = splitIndex + parseInt(el.getAttribute('data-dir'), 10);
+        if (splitIndex < 0 || splitTarget < 0 || splitTarget >= DB().splits.length) break;
+        var splitBefore = JSON.stringify(DB());
+        var splitTemp = DB().splits[splitIndex];
+        DB().splits[splitIndex] = DB().splits[splitTarget];
+        DB().splits[splitTarget] = splitTemp;
+        if (!Store.save()) Store.data = JSON.parse(splitBefore);
+        render();
         break;
       }
 
@@ -2720,6 +3243,16 @@
         }
         break;
       }
+    }
+  });
+
+  document.addEventListener('submit', function (ev) {
+    if (ev.target && ev.target.id === 'editWorkoutForm') {
+      ev.preventDefault();
+      submitWorkoutEdit();
+    } else if (ev.target && ev.target.id === 'historyWorkoutForm') {
+      ev.preventDefault();
+      submitHistoryWorkout();
     }
   });
 
