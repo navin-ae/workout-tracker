@@ -1076,7 +1076,7 @@
 
   /* --- Exercise picker ------------------------------------------------------ */
 
-  var pickerMode = null;   /* {kind:'add'|'replace'|'plan', exIdx, splitId} */
+  var pickerMode = null;   /* {kind:'add'|'edit-add'|'replace'|'plan', exIdx, splitId} */
 
   function openPicker(mode) {
     pickerMode = mode;
@@ -1893,9 +1893,29 @@
         '<span class="row-sub">' + fmtDate(w.ts) + ' · ' + plural(setsOfWorkout(w), 'set') +
         (w.cardio.done ? ' · cardio' : '') + '</span></button>' +
         '<button class="edit-action" data-act="edit-workout" data-id="' + esc(w.id) + '" aria-label="Edit ' +
-        esc(split.name + ' workout from ' + fmtDate(w.ts)) + '">' + icon('pencil') + '<span>Edit</span></button></div>';
+        esc(split.name + ' workout from ' + fmtDate(w.ts)) + '">' + icon('pencil') + '<span>Edit</span></button>' +
+        '<button class="delete-action" data-act="delete-workout" data-id="' + esc(w.id) + '" aria-label="Delete ' +
+        esc(split.name + ' workout from ' + fmtDate(w.ts)) + '">' + icon('trash') + '</button></div>';
     });
     view.innerHTML = html + '</div></div>';
+  }
+
+  function deleteWorkout(id) {
+    var index = DB().workouts.findIndex(function (w) { return w.id === id; });
+    if (index < 0) { toast('Workout no longer exists'); return; }
+    var workout = DB().workouts[index];
+    if (!confirm('Delete the ' + splitById(workout.split).name + ' workout from ' + fmtDate(workout.ts) +
+      '? This cannot be undone.')) return;
+
+    var previousWorkouts = JSON.stringify(DB().workouts);
+    DB().workouts.splice(index, 1);
+    recomputeAllPRs();
+    if (!Store.save()) {
+      DB().workouts = JSON.parse(previousWorkouts);
+      return;
+    }
+    screenAllWorkouts();
+    toast('Workout deleted');
   }
 
   function screenNewHistoryWorkout() {
@@ -1955,24 +1975,29 @@
       options.map(function (s) { return '<option value="' + esc(s.id) + '"' + (s.id === w.split ? ' selected' : '') +
         '>' + esc(s.name) + '</option>'; }).join('') + '</select></label>' +
       '<label class="edit-field">Date<input name="date" type="date" required max="' + dayKey(Date.now()) +
-        '" value="' + dayKey(w.ts) + '"></label></div>' +
+        '" value="' + esc(w.editDate !== undefined ? w.editDate : dayKey(w.ts)) + '"></label></div>' +
       '<div class="edit-readonly">Duration: ' + (w.durationMs ? esc(fmtDuration(w.durationMs)) : 'Not recorded') + '</div>' +
       '<fieldset class="edit-cardio"><legend>Cardio</legend>' +
       '<label class="edit-check"><input name="cardioDone" type="checkbox"' + (w.cardio.done ? ' checked' : '') +
         '> ' + esc(CARDIO.name) + ' completed</label>' +
       '<label class="edit-field">Minutes<input name="cardioMinutes" type="number" min="1" max="600" step="1" required value="' +
         esc(w.cardio.minutes) + '"></label></fieldset>';
+    html += '<button class="btn edit-add-exercise" type="button" data-act="edit-add-exercise">' +
+      '<span class="action-icon">' + icon('plus') + '</span>Add exercise</button>';
     w.entries.forEach(function (entry, ei) {
-      html += '<fieldset class="edit-entry"><legend>' + esc(entry.exercise) + '</legend>' +
+      html += '<fieldset class="edit-entry"><legend><span>' + esc(entry.exercise) + '</span>' +
+        '<button class="link edit-remove-exercise" type="button" data-act="edit-remove-exercise" data-entry="' + ei +
+        '" aria-label="Remove ' + esc(entry.exercise) + '">Remove</button></legend>' +
         '<label class="edit-field edit-note">Note<input data-entry="' + ei + '" data-field="note" maxlength="120" value="' +
         esc(entry.note || '') + '"></label>';
       entry.sets.forEach(function (set, si) {
         var timed = typeOf(entry.exercise) === 'time';
         html += '<div class="edit-set"><label class="edit-field">' + (timed ? 'Seconds' : 'Weight (' + UNIT + ')') +
           '<input type="number" inputmode="decimal" min="0" step="any" required data-entry="' + ei + '" data-set="' + si +
-          '" data-field="' + (timed ? 'r' : 'w') + '" value="' + (timed ? esc(set.r) : esc(set.w)) + '"></label>' +
+          '" data-field="' + (timed ? 'r' : 'w') + '" value="' +
+          (timed ? (set.r == null ? '' : esc(set.r)) : (set.w == null ? '' : esc(set.w))) + '"></label>' +
           (!timed ? '<label class="edit-field">Reps<input type="number" inputmode="numeric" min="1" step="1" required data-entry="' +
-          ei + '" data-set="' + si + '" data-field="r" value="' + esc(set.r) + '"></label>' : '') +
+          ei + '" data-set="' + si + '" data-field="r" value="' + (set.r == null ? '' : esc(set.r)) + '"></label>' : '') +
           '<label class="edit-check"><input type="checkbox" data-entry="' + ei + '" data-set="' + si + '" data-field="warm"' +
             (set.warm ? ' checked' : '') + '> Warm-up</label></div>';
       });
@@ -1982,6 +2007,27 @@
       '<button class="btn btn-primary" type="submit"' + (editSaving ? ' disabled' : '') + '>Save changes</button>' +
       '<button class="btn btn-ghost" type="button" data-act="cancel-workout-edit">Cancel</button></form></div>';
     view.innerHTML = html;
+  }
+
+  function syncEditDraftFromForm() {
+    var form = $('#editWorkoutForm');
+    if (!form || !editDraft) return;
+    editDraft.split = form.elements.split.value;
+    editDraft.editDate = form.elements.date.value;
+    editDraft.cardio.done = form.elements.cardioDone.checked;
+    editDraft.cardio.minutes = form.elements.cardioMinutes.value;
+    editDraft.entries.forEach(function (entry, ei) {
+      var note = form.querySelector('[data-entry="' + ei + '"][data-field="note"]');
+      if (note) entry.note = note.value;
+      entry.sets.forEach(function (set, si) {
+        ['w', 'r'].forEach(function (field) {
+          var input = form.querySelector('[data-entry="' + ei + '"][data-set="' + si + '"][data-field="' + field + '"]');
+          if (input) set[field] = input.value;
+        });
+        var warm = form.querySelector('[data-entry="' + ei + '"][data-set="' + si + '"][data-field="warm"]');
+        if (warm) set.warm = warm.checked;
+      });
+    });
   }
 
   function submitWorkoutEdit() {
@@ -2895,6 +2941,20 @@
       case 'all-workouts': go('workouts'); break;
       case 'new-history-workout': go('new-history-workout', { date: el.getAttribute('data-date') || '' }); break;
       case 'edit-workout': beginWorkoutEdit(el.getAttribute('data-id')); break;
+      case 'delete-workout': deleteWorkout(el.getAttribute('data-id')); break;
+      case 'edit-add-exercise':
+        syncEditDraftFromForm();
+        openPicker({ kind: 'edit-add' });
+        break;
+      case 'edit-remove-exercise': {
+        syncEditDraftFromForm();
+        var removeIndex = parseInt(el.getAttribute('data-entry'), 10);
+        if (removeIndex >= 0 && removeIndex < editDraft.entries.length) {
+          editDraft.entries.splice(removeIndex, 1);
+          screenEditWorkout();
+        }
+        break;
+      }
       case 'range-export': go('export'); break;
       case 'export-range': exportWorkoutRange(el.getAttribute('data-format')); break;
       case 'cancel-workout-edit': {
@@ -3021,6 +3081,10 @@
           a.entries[pickerMode.exIdx] = buildEntry(name, false);
           Store.save(); closeSheet(); render();
           toast('Swapped in ' + name);
+        } else if (pickerMode.kind === 'edit-add') {
+          editDraft.entries.push(buildEntry(name, false));
+          closeSheet();
+          screenEditWorkout();
         } else {
           a.entries.push(buildEntry(name, false));
           Store.save(); closeSheet(); render();
@@ -3055,11 +3119,15 @@
         };
         if (pickerMode && pickerMode.kind === 'plan') {
           DB().plan[pickerMode.splitId].push(nm);
+        } else if (pickerMode && pickerMode.kind === 'edit-add') {
+          editDraft.entries.push(buildEntry(nm, false));
         } else if (a) {
           if (pickerMode && pickerMode.kind === 'replace') a.entries[pickerMode.exIdx] = buildEntry(nm, false);
           else a.entries.push(buildEntry(nm, false));
         }
-        Store.save(); closeSheet(); render();
+        Store.save(); closeSheet();
+        if (pickerMode && pickerMode.kind === 'edit-add') screenEditWorkout();
+        else render();
         toast(nm + ' created');
         break;
       }

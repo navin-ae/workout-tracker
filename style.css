@@ -695,6 +695,13 @@ body.is-focusmode .tabbar { display: none; }
 }
 .edit-action svg { width: 17px; height: 17px; }
 .edit-action:active { background: var(--field); }
+.delete-action {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; min-height: 44px; margin-left: 2px; border-radius: 9px;
+  color: var(--red);
+}
+.delete-action svg { width: 18px; height: 18px; }
+.delete-action:active { background: color-mix(in srgb, var(--red) 10%, transparent); }
 
 .split-manager-head { align-items: center; }
 .split-manager-head h2 { min-width: 0; }
@@ -718,6 +725,9 @@ body.is-focusmode .tabbar { display: none; }
 .edit-readonly { margin: 4px 2px 14px; color: var(--ink-3); font-size: 13px; }
 .edit-cardio, .edit-entry { min-width: 0; padding: 13px 0; border: 0; border-top: 1px solid var(--rule); }
 .edit-cardio legend, .edit-entry legend { padding: 0 2px; font-size: 16px; font-weight: 690; color: var(--ink); }
+.edit-entry legend { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; }
+.edit-remove-exercise { min-height: 36px; padding: 0 4px; color: var(--red); font-size: 13px; font-weight: 620; }
+.edit-add-exercise { margin-bottom: 10px; }
 .edit-cardio .edit-field { margin-top: 10px; }
 .edit-check { display: inline-flex; align-items: center; gap: 9px; min-height: 44px;
   color: var(--ink-2); font-size: 14px; font-weight: 570; }
